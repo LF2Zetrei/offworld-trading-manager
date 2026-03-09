@@ -1,0 +1,30 @@
+# Offworld Trading Manager Configuration
+# Copy this file to application.properties and fill in your values
+
+# Server connection
+server.base-url=http://localhost:8080
+player.id=your-player-id
+player.api-key=your-api-key
+
+# Webhook server
+webhook.host=0.0.0.0
+webhook.port=9090
+webhook.public-url=http://your-machine:9090/webhooks
+
+# Polling intervals (milliseconds)
+polling.ship-status-interval-ms=2000
+polling.construction-status-interval-ms=5000
+polling.market-refresh-interval-ms=10000
+polling.trade-request-interval-ms=15000
+
+# Trading strategy
+strategy.min-profit-margin=0.10
+strategy.max-order-credits-pct=0.20
+strategy.max-concurrent-ships=5
+strategy.elevator-retry-attempts=3
+strategy.elevator-retry-delay-ms=5000
+
+# HTTP client timeouts
+http.connect-timeout-ms=5000
+http.response-timeout-ms=60000
+http.elevator-timeout-ms=120000
