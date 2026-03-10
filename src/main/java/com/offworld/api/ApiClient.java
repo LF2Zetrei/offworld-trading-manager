@@ -64,12 +64,10 @@ public class ApiClient {
     // ─── Body helper ─────────────────────────────────────────────────────────────
 
     private Publisher<ByteBuf> toBody(Object body) {
-        try {
+        return Mono.fromCallable(() -> {
             byte[] bytes = mapper.writeValueAsBytes(body);
-            return Mono.just(io.netty.buffer.Unpooled.wrappedBuffer(bytes));
-        } catch (Exception e) {
-            return Mono.error(e);
-        }
+            return io.netty.buffer.Unpooled.wrappedBuffer(bytes);
+        });
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -143,7 +141,7 @@ public class ApiClient {
     }
 
     public Mono<Planet> getPlanet(String systemName, String planetId) {
-        return get("/systems/" + encode(systemName) + "/planets/" + planetId, new TypeReference<>() {});
+        return get("/systems/" + encode(systemName) + "/planets/" + encode(planetId), new TypeReference<>() {});
     }
 
     public Mono<List<Planet>> getSettlements(String systemName) {
@@ -151,20 +149,20 @@ public class ApiClient {
     }
 
     public Mono<Models.Settlement> getSettlement(String systemName, String planetId) {
-        return get("/settlements/" + encode(systemName) + "/" + planetId, new TypeReference<>() {});
+        return get("/settlements/" + encode(systemName) + "/" + encode(planetId), new TypeReference<>() {});
     }
 
     // ─── Station ──────────────────────────────────────────────────────────────
 
     public Mono<Models.Station> getStation(String systemName, String planetId) {
-        return get("/settlements/" + encode(systemName) + "/" + planetId + "/station",
+        return get("/settlements/" + encode(systemName) + "/" + encode(planetId) + "/station",
                    new TypeReference<>() {});
     }
 
     // ─── Space Elevator ───────────────────────────────────────────────────────
 
     public Mono<SpaceElevator> getSpaceElevator(String systemName, String planetId) {
-        return get("/settlements/" + encode(systemName) + "/" + planetId + "/space-elevator",
+        return get("/settlements/" + encode(systemName) + "/" + encode(planetId) + "/space-elevator",
                    new TypeReference<>() {});
     }
 
@@ -176,7 +174,7 @@ public class ApiClient {
     public Mono<TransferResult> transferElevator(String systemName, String planetId,
                                                  TransferRequest request) {
         return elevatorClient.post()
-                .uri("/settlements/" + encode(systemName) + "/" + planetId + "/space-elevator/transfer")
+                .uri("/settlements/" + encode(systemName) + "/" + encode(planetId) + "/space-elevator/transfer")
                 .send(toBody(request))
                 .responseSingle((res, buf) -> buf.asString()
                         .flatMap(resp -> {

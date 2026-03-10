@@ -273,7 +273,7 @@ public final class Models {
             @JsonProperty("good_name") String goodName,
             String side,
             @JsonProperty("order_type") String orderType,
-            Double price,
+            long price,
             long quantity,
             @JsonProperty("station_planet_id") String stationPlanetId) {}
 

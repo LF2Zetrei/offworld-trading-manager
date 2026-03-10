@@ -79,7 +79,7 @@ public class MarketService {
     /**
      * Place a limit buy order reactively.
      */
-    public Mono<MarketOrder> placeBuyOrder(String goodName, double price, long quantity,
+    public Mono<MarketOrder> placeBuyOrder(String goodName, long price, long quantity,
                                            String stationPlanetId) {
         PlaceOrderRequest req = new PlaceOrderRequest(goodName, "buy", "limit",
                 price, quantity, stationPlanetId);
@@ -91,7 +91,7 @@ public class MarketService {
     /**
      * Place a limit sell order reactively.
      */
-    public Mono<MarketOrder> placeSellOrder(String goodName, double price, long quantity,
+    public Mono<MarketOrder> placeSellOrder(String goodName, long price, long quantity,
                                             String stationPlanetId) {
         PlaceOrderRequest req = new PlaceOrderRequest(goodName, "sell", "limit",
                 price, quantity, stationPlanetId);

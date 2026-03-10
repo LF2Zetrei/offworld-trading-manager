@@ -138,7 +138,29 @@ public class TradingStrategy {
                                 board.indexOf(e) + 1, e.profit())))
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe();
+        // 6. Update credits every 15 seconds
+        Flux.interval(Duration.ofSeconds(15))
+                .flatMap(tick -> refreshPlayerProfile())
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe();
 
+        // 7. Check the surface and use the elevator every 20 seconds
+        Flux.interval(Duration.ofSeconds(20))
+                .flatMap(tick -> manageElevatorTransfers())
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe();
+
+        // Sell station's inventory every 30 seconds
+        Flux.interval(Duration.ofSeconds(30))
+                .flatMap(tick -> sellStationInventory())
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe();
+
+        //to verify if we can ship goods
+        Flux.interval(Duration.ofSeconds(45))
+                .flatMap(tick -> dispatchShipToEarth())
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe();
         log.info("All trading pipelines launched");
     }
 
@@ -198,21 +220,30 @@ public class TradingStrategy {
     }
 
     private Mono<Void> executeOpportunity(Opportunity opp) {
-        log.info("Trading opportunity: {} — buy@{} sell@{} qty={} est.profit={}",
-                opp.goodName(), opp.buyPrice(), opp.sellPrice(), opp.quantity(),
-                String.format("%.0f", opp.estimatedProfit()));
+        if (ships.getShipStatuses().size() >= config.getMaxConcurrentShips()) {
+            log.debug("Maximum active ships reached. Waiting for current deliveries...");
+            return Mono.empty();
+        }
 
-        // Place buy order
-        Mono<MarketOrder> buy = market.placeBuyOrder(
-                opp.goodName(), opp.buyPrice(), opp.quantity(), myPlanetId)
-                .doOnNext(o -> openOrders.put(o.id(), o));
+        return Flux.fromIterable(galaxy.getConnectedPlanets().values())
+                .filter(p -> !p.id().equals(myPlanetId))
+                .next()
+                .flatMap(targetPlanet -> {
+                    long buyPrice = (long) Math.ceil(opp.buyPrice());
 
-        // Place sell order after buy is confirmed
-        Mono<MarketOrder> sell = market.placeSellOrder(
-                opp.goodName(), opp.sellPrice(), opp.quantity(), myPlanetId)
-                .doOnNext(o -> openOrders.put(o.id(), o));
+                    log.info("Interplanetary Trade: Buying {}x {} @ {} on {}",
+                            opp.quantity(), opp.goodName(), buyPrice, targetPlanet.name());
 
-        return buy.then(sell).then();
+                    return market.placeBuyOrder(opp.goodName(), buyPrice, opp.quantity(), targetPlanet.id())
+                            .doOnNext(o -> openOrders.put(o.id(), o))
+                            .delayElement(Duration.ofSeconds(5))
+                            .flatMap(order -> {
+                                log.info("Hiring trucking ship to transport {} from {} to {}",
+                                        opp.goodName(), targetPlanet.name(), mySystemName);
+                                return ships.hireTrucking(targetPlanet.id(), myPlanetId, Map.of(opp.goodName(), opp.quantity()));
+                            });
+                })
+                .then();
     }
 
     // ─── Order monitoring ─────────────────────────────────────────────────────
@@ -235,11 +266,10 @@ public class TradingStrategy {
     private Mono<Void> manageTradeRequests() {
         return api.getTradeRequests()
                 .flatMap(requests -> {
-                    long activeCount = requests.stream()
-                            .filter(r -> "active".equals(r.status())).count();
+                    boolean hasActive = requests.stream()
+                            .anyMatch(r -> "active".equals(r.status()));
 
-                    if (activeCount == 0) {
-                        // Seed a standing export request to keep supply flowing
+                    if (!hasActive) {
                         log.info("No active trade requests, seeding export...");
                         TradeRequestCreate req = new TradeRequestCreate(
                                 myPlanetId, "iron_ore", "export",
@@ -250,5 +280,94 @@ public class TradingStrategy {
                     }
                     return Mono.empty();
                 });
+    }
+
+    //Add new mission if no one from earth is buying form us
+    private Mono<Void> dispatchShipToEarth() {
+        if (mySystemName == null || myPlanetId == null) return Mono.empty();
+
+        if (!ships.getShipStatuses().isEmpty()) {
+            return Mono.empty();
+        }
+
+        return api.getStation(mySystemName, myPlanetId)
+                .flatMap(station -> {
+                    long ironQty = station.inventory().getOrDefault("iron_ore", 0L);
+
+                    if (ironQty >= 500) {
+                        log.info("📦 Enough iron_ore accumulated. Dispatching a cargo ship to Earth (Sol-3)!");
+                        return ships.hireTrucking(myPlanetId, "Sol-3", Map.of("iron_ore", 500L)).then();
+                    }
+                    return Mono.empty();
+                })
+                .onErrorResume(e -> Mono.empty());
+    }
+
+    // for credits update
+    private Mono<Void> refreshPlayerProfile() {
+        return api.getPlayer()
+                .doOnNext(player -> this.myCredits = player.credits())
+                .then();
+    }
+
+    //for spatial elevator usage
+    private Mono<Void> manageElevatorTransfers() {
+        if (mySystemName == null || myPlanetId == null) return Mono.empty();
+
+        return api.getSpaceElevator(mySystemName, myPlanetId)
+                .flatMap(se -> {
+                    if (se.warehouse() != null && config.getPlayerId().equals(se.warehouse().ownerId())) {
+                        List<TransferItem> itemsToTransfer = new ArrayList<>();
+                        long capacity = se.config().cabinCapacity();
+                        long currentLoad = 0;
+
+                        for (Map.Entry<String, Long> entry : se.warehouse().inventory().entrySet()) {
+                            String good = entry.getKey();
+                            long qty = entry.getValue();
+
+                            if (qty > 1 && currentLoad < capacity) {
+                                long availableToTransfer = qty - 1;
+                                long transferQty = Math.min(availableToTransfer, capacity - currentLoad);
+                                itemsToTransfer.add(new TransferItem(good, transferQty));
+                                currentLoad += transferQty;
+                            }
+                        }
+
+                        if (!itemsToTransfer.isEmpty()) {
+                            log.info("Elevator: Transferring {} units to orbit...", currentLoad);
+                            return elevator.transferToOrbit(mySystemName, myPlanetId, itemsToTransfer).then();
+                        }
+                    }
+                    return Mono.empty();
+                })
+                .onErrorResume(e -> {
+                    log.warn("Elevator check failed: {}", e.getMessage());
+                    return Mono.empty();
+                });
+    }
+
+    //for automatic inventory sell
+    private Mono<Void> sellStationInventory() {
+        if (mySystemName == null || myPlanetId == null) return Mono.empty();
+
+        return api.getStation(mySystemName, myPlanetId)
+                .flatMap(station -> {
+                    if (station.inventory() == null || station.inventory().isEmpty()) return Mono.empty();
+
+                    return Flux.fromIterable(station.inventory().entrySet())
+                            .filter(entry -> entry.getValue() > 0)
+                            .filter(entry -> !"iron_ore".equals(entry.getKey()))
+                            .flatMap(entry -> {
+                                String good = entry.getKey();
+                                long qty = entry.getValue();
+                                Double currentPrice = market.getPrice(good);
+                                long sellPrice = (currentPrice != null) ? Math.round(currentPrice) : 10L;
+
+                                log.info("Selling inventory: {}x {} @ {}", qty, good, sellPrice);
+                                return market.placeSellOrder(good, sellPrice, qty, myPlanetId);
+                            })
+                            .then();
+                })
+                .onErrorResume(e -> Mono.empty());
     }
 }
