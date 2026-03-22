@@ -184,6 +184,11 @@ public class TradingStrategy {
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe(null, e -> log.error("Error in dispatchShipToEarth", e));
 
+        Flux.interval(Duration.ofMinutes(5))
+                .flatMap(tick -> galaxy.exploreGalaxy().onErrorResume(e -> Mono.empty()))
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe(null, e -> log.error("Error in galaxy refresh loop", e));
+
         log.info("All trading pipelines and queue consumers launched");
     }
 
@@ -245,13 +250,24 @@ public class TradingStrategy {
                 .flatMap(prices -> Flux.fromIterable(prices.keySet())
                         .flatMap(good -> api.getOrderBook(good).onErrorResume(e -> Mono.empty()), 5)
                         .filter(book -> book.bids() != null && !book.bids().isEmpty())
-                        .doOnNext(book -> {
+                        .flatMap(book -> {
                             OrderBookLevel bestBid = book.bids().get(0);
                             if (bestBid.price() > 0) {
-                                // On utilise Sol-4 (Mars) comme cible valide
-                                DeliveryTask task = new DeliveryTask(book.goodName(), 10, "Sol-4", bestBid.price());
-                                deliveryQueue.tryEmitNext(task);
+                                return Flux.fromIterable(galaxy.getConnectedPlanets().values())
+                                        .filter(p -> !p.id().equals(myPlanetId))
+                                        .next()
+                                        .doOnNext(targetPlanet -> {
+                                            DeliveryTask task = new DeliveryTask(book.goodName(), 10, targetPlanet.id(), bestBid.price());
+                                            deliveryQueue.tryEmitNext(task);
+                                            log.info("Export from {} to {}", book.goodName(), targetPlanet.id());
+                                        })
+                                        .switchIfEmpty(Mono.defer(() -> {
+                                            log.warn("Can't deliver {} : no planet to deliver found", book.goodName());
+                                            return Mono.empty();
+                                        }))
+                                        .then();
                             }
+                            return Mono.empty();
                         })
                         .then());
     }
@@ -349,20 +365,24 @@ public class TradingStrategy {
     }
 
     private Mono<Void> manageTradeRequests() {
+        if (mySystemName == null || myPlanetId == null) return Mono.empty();
         return api.getTradeRequests()
                 .flatMap(requests -> {
                     boolean hasActive = requests.stream().anyMatch(r -> "active".equals(r.status()));
-                    if (!hasActive) {
-                        // FIX DEFINITIF: iron_ore (nom correct) + total (mode supporté par le serveur)
-                        TradeRequestCreate req = new TradeRequestCreate(
-                                myPlanetId, "iron_ore", "export",
-                                "total", 5, null, null);
+                    if (hasActive)
+                        return Mono.empty();
+                    return api.getStation(mySystemName, myPlanetId).flatMap(station -> {
+                        if(station.inventory() == null || station.inventory().isEmpty())
+                            return Mono.empty();
+
+                        String firstAvailableResource = station.inventory().keySet().iterator().next();
+                        TradeRequestCreate req = new TradeRequestCreate(myPlanetId, firstAvailableResource, "export", "total", 5, null, null);
                         return api.createTradeRequest(req)
-                                .doOnSuccess(r -> log.info("Trade request created: iron_ore (total mode)"))
+                                .doOnSuccess(r -> log.info("Trade request created: {} (total mode)", firstAvailableResource))
                                 .then();
-                    }
-                    return Mono.empty();
-                });
+                    });
+        })
+        .onErrorResume(e -> Mono.empty());
     }
 
     private Mono<Void> dispatchShipToEarth() {
@@ -371,9 +391,24 @@ public class TradingStrategy {
 
         return api.getStation(mySystemName, myPlanetId)
                 .flatMap(station -> {
-                    long ironQty = station.inventory().getOrDefault("iron_ore", 0L);
-                    if (ironQty >= 500) {
-                        return ships.hireTrucking(myPlanetId, "Sol-3", Map.of("iron_ore", 500L)).then();
+                    if (station.inventory() == null || station.inventory().isEmpty()) return Mono.empty();
+
+                    Map.Entry<String, Long> resourceToSend = station.inventory().entrySet().stream()
+                            .filter(e -> e.getValue() > 0)
+                            .findFirst()
+                            .orElse(null);
+
+                    if (resourceToSend != null && resourceToSend.getValue() >= 500) {
+                        return Flux.fromIterable(galaxy.getConnectedPlanets().values())
+                                .filter(p -> !p.id().equals(myPlanetId))
+                                .next()
+                                .switchIfEmpty(Mono.defer(() -> {
+                                    log.warn("No planet found");
+                                    return Mono.empty();
+                                }))
+                                .flatMap(targetPlanet ->
+                                        ships.hireTrucking(myPlanetId, targetPlanet.id(), Map.of(resourceToSend.getKey(), 500L)).then()
+                                );
                     }
                     return Mono.empty();
                 })
@@ -426,7 +461,6 @@ public class TradingStrategy {
 
                     return Flux.fromIterable(station.inventory().entrySet())
                             .filter(entry -> entry.getValue() > 0)
-                            .filter(entry -> !entry.getKey().equals("iron_ore")) // Protection stock de base
                             .filter(entry -> !blockedSales.contains(entry.getKey()))
                             .flatMap(entry -> {
                                 String good = entry.getKey();
