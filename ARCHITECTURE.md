@@ -150,6 +150,13 @@ via `subscribeOn(Schedulers.boundedElastic())`.
 
 ---
 
+### 8. Goal-Based Resource Reservation
+```
+To prevent the bot from selling resources required for construction, a reservation system was added to the pipeline:
+- Evaluation: evaluateGoals() periodically scans for storage issues or expansion opportunities.
+- Locking: Resources are flagged in reservedGoods. All selling methods (sellStationInventory) subtract these reservations from the available total.
+- Acquisition: If a goal is active but goods are missing, the bot reactively places BUY orders to pull materials from the market.
+```
 ## Data Flow: Market Trade → Order Placement
 
 ```

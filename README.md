@@ -135,7 +135,13 @@ The strategy runs three parallel loops:
 - **SSE reaction** — updates price history on every trade event
 - **Market scan** — every 10s, checks order books for profitable spreads and places limit buy+sell pairs
 - **Trade requests** — seeds standing export requests to maintain supply
-
+The application implements a sophisticated autonomous loop:
+- **SSE Market Reaction** — Updates local price history to identify high-value goods.
+- **Economy Seeding** —  Uses IMPORT trade requests to stimulate planetary production and fill the warehouse.
+- **Hybrid Selling Strategy** —
+    - **Market Taker**: Sells instantly to existing buyers (Bids) for immediate profit.
+    - **Market Maker**: Places Limit Sell orders for excess stock while maintaining a 500-unit safety buffer.
+- **Infrastructure Expansion** —  Automatically detects "Settled" planets and triggers station construction once credit and resource thresholds are met.
 ---
 
 ## Interaction Patterns
