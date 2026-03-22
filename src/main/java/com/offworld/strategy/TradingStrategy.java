@@ -31,11 +31,11 @@ public class TradingStrategy {
     private final ShipService ships;
     private final ElevatorService elevator;
 
-    // ─── ETAT ET VERROUS ──────────────────────────────────────────────────────
+    // ─── LOCKS AND STATES ──────────────────────────────────────────────────────
     private final Set<String> blockedSales = ConcurrentHashMap.newKeySet();
     private final Map<String, Long> reservedForBuild = new ConcurrentHashMap<>();
 
-    // ─── FILES D'ATTENTE REACTIVES (Sinks) ────────────────────────────────────
+    // ─── REACTIVE QUEUES ────────────────────────────────────
     private final Sinks.Many<ConstructionTask> constructionQueue = Sinks.many().multicast().onBackpressureBuffer();
     private final Sinks.Many<DeliveryTask> deliveryQueue = Sinks.many().multicast().onBackpressureBuffer();
     private final Sinks.Many<PurchaseTask> purchaseQueue = Sinks.many().multicast().onBackpressureBuffer();
@@ -104,7 +104,7 @@ public class TradingStrategy {
     }
 
     private void launchPipelines() {
-        // ─── CONSOMMATEURS DES FILES D'ATTENTE ────────────────────────────────
+        // ─── QUEUES CONSUMERS ────────────────────────────────
 
         deliveryQueue.asFlux()
                 .flatMap(this::processDelivery)
@@ -193,7 +193,7 @@ public class TradingStrategy {
         while (hist.size() > 20) hist.poll();
     }
 
-    // ─── LOGIQUE DES CONSOMMATEURS ──────────────────────────────────────────
+    // ─── CONSUMERS LOGIC ──────────────────────────────────────────
 
     private Mono<Void> processDelivery(DeliveryTask task) {
         if (blockedSales.contains(task.goodName())) {
@@ -275,7 +275,7 @@ public class TradingStrategy {
                 .then();
     }
 
-    // ─── FONCTIONS D'ORIGINE CONSERVÉES ───────────────────────────────────────
+    // ─── BASE FUNCTIONS ───────────────────────────────────────
 
     private Mono<Void> scanAndTrade() {
         return api.getMarketPrices()
