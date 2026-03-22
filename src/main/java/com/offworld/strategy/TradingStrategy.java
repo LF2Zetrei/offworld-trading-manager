@@ -8,26 +8,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
 import com.offworld.model.Models.*;
 
 /**
- * Automated trading strategy.
- *
- * <p>Pipeline overview:
- * <ol>
- *   <li>Observe SSE trade events to detect price trends.</li>
- *   <li>Periodically scan order books for spread opportunities.</li>
- *   <li>Place limit buy + sell orders to capture the spread.</li>
- *   <li>Monitor active ships count; hire trucking for physical cargo moves.</li>
- *   <li>Manage trade requests to seed supply/demand as needed.</li>
- * </ol>
+ * Automated trading strategy - Full Reactive Architecture.
+ * Synchronized with Rust Server documentation (iron_ore + total mode).
  */
 public class TradingStrategy {
     private static final Logger log = LoggerFactory.getLogger(TradingStrategy.class);
@@ -38,6 +30,21 @@ public class TradingStrategy {
     private final MarketService market;
     private final ShipService ships;
     private final ElevatorService elevator;
+
+    // ─── ETAT ET VERROUS ──────────────────────────────────────────────────────
+    private final Set<String> blockedSales = ConcurrentHashMap.newKeySet();
+    private final Map<String, Long> reservedForBuild = new ConcurrentHashMap<>();
+
+    // ─── FILES D'ATTENTE REACTIVES (Sinks) ────────────────────────────────────
+    private final Sinks.Many<ConstructionTask> constructionQueue = Sinks.many().multicast().onBackpressureBuffer();
+    private final Sinks.Many<DeliveryTask> deliveryQueue = Sinks.many().multicast().onBackpressureBuffer();
+    private final Sinks.Many<PurchaseTask> purchaseQueue = Sinks.many().multicast().onBackpressureBuffer();
+    private final Sinks.Many<PlanetSearchTask> planetSearchQueue = Sinks.many().multicast().onBackpressureBuffer();
+
+    public record ConstructionTask(String targetPlanetId, String projectType, Map<String, Long> requiredResources) {}
+    public record DeliveryTask(String goodName, long quantity, String targetPlanetId, double sellPrice) {}
+    public record PurchaseTask(String goodName, long quantityToBuy, double maxPricePerUnit) {}
+    public record PlanetSearchTask(String highlyDemandedGood) {}
 
     // Track recent prices per good from SSE
     private final Map<String, Deque<Double>> priceHistory = new ConcurrentHashMap<>();
@@ -61,15 +68,11 @@ public class TradingStrategy {
         this.elevator = elevator;
     }
 
-    /**
-     * Bootstrap: find our station, then launch all automated loops.
-     */
     public Mono<Void> start() {
         return initializeMyStation()
                 .then(Mono.fromRunnable(this::launchPipelines));
     }
 
-    // Remplace initializeMyStation() par ceci temporairement
     private Mono<Void> initializeMyStation() {
         return api.getPlayer()
                 .flatMap(player -> {
@@ -79,7 +82,6 @@ public class TradingStrategy {
                 })
                 .then(galaxy.exploreGalaxy()
                         .doOnNext(p -> {
-                            // LOG TEMPORAIRE pour voir ce qu'on reçoit
                             Station st = p.station();
                             log.info("Planet: {} | Station: {} | OwnerId: {}",
                                     p.name(),
@@ -102,31 +104,51 @@ public class TradingStrategy {
     }
 
     private void launchPipelines() {
+        // ─── CONSOMMATEURS DES FILES D'ATTENTE ────────────────────────────────
+
+        deliveryQueue.asFlux()
+                .flatMap(this::processDelivery)
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe(null, e -> log.error("Error in delivery consumer", e));
+
+        constructionQueue.asFlux()
+                .flatMap(this::processConstruction)
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe(null, e -> log.error("Error in construction consumer", e));
+
         // 1. React to SSE trade events
         market.tradeEvents()
                 .doOnNext(this::onTradeEvent)
                 .subscribeOn(Schedulers.parallel())
-                .subscribe();
+                .subscribe(null, e -> log.error("Error in trade events stream", e));
 
-        // 2. Periodic market scan & order placement
+        // 2. SCANNERS (Intervals)
         Flux.interval(Duration.ofMillis(config.getMarketRefreshIntervalMs()))
-                .flatMap(tick -> scanAndTrade())
+                .flatMap(tick -> scanAndTrade().onErrorResume(e -> Mono.empty()))
                 .subscribeOn(Schedulers.boundedElastic())
-                .doOnError(e -> log.error("Market scan error", e))
-                .retryWhen(reactor.util.retry.Retry.fixedDelay(Long.MAX_VALUE, Duration.ofSeconds(15)))
-                .subscribe();
+                .subscribe(null, e -> log.error("Error in scanAndTrade loop", e));
+
+        Flux.interval(Duration.ofMillis(config.getMarketRefreshIntervalMs() + 500))
+                .flatMap(tick -> scanMarketForDeliveries().onErrorResume(e -> Mono.empty()))
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe(null, e -> log.error("Error in scanMarketForDeliveries loop", e));
+
+        Flux.interval(Duration.ofSeconds(45))
+                .flatMap(tick -> scanStationForUpgrades().onErrorResume(e -> Mono.empty()))
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe(null, e -> log.error("Error in scanStationForUpgrades loop", e));
 
         // 3. Monitor our orders
         Flux.interval(Duration.ofSeconds(30))
-                .flatMap(tick -> refreshOpenOrders())
+                .flatMap(tick -> refreshOpenOrders().onErrorResume(e -> Mono.empty()))
                 .subscribeOn(Schedulers.boundedElastic())
-                .subscribe();
+                .subscribe(null, e -> log.error("Error in refreshOpenOrders loop", e));
 
         // 4. Seed trade requests to generate supply
         Flux.interval(Duration.ofMillis(config.getTradeRequestIntervalMs()))
-                .flatMap(tick -> manageTradeRequests())
+                .flatMap(tick -> manageTradeRequests().onErrorResume(e -> Mono.empty()))
                 .subscribeOn(Schedulers.boundedElastic())
-                .subscribe();
+                .subscribe(null, e -> log.error("Error in manageTradeRequests loop", e));
 
         // 5. Leaderboard check
         Flux.interval(Duration.ofMinutes(1))
@@ -137,73 +159,151 @@ public class TradingStrategy {
                         .ifPresent(e -> log.info("Leaderboard: rank={}, profit={}",
                                 board.indexOf(e) + 1, e.profit())))
                 .subscribeOn(Schedulers.boundedElastic())
-                .subscribe();
+                .subscribe(null, e -> log.error("Error in leaderboard check", e));
+
         // 6. Update credits every 15 seconds
         Flux.interval(Duration.ofSeconds(15))
-                .flatMap(tick -> refreshPlayerProfile())
+                .flatMap(tick -> refreshPlayerProfile().onErrorResume(e -> Mono.empty()))
                 .subscribeOn(Schedulers.boundedElastic())
-                .subscribe();
+                .subscribe(null, e -> log.error("Error in refreshPlayerProfile", e));
 
         // 7. Check the surface and use the elevator every 20 seconds
         Flux.interval(Duration.ofSeconds(20))
-                .flatMap(tick -> manageElevatorTransfers())
+                .flatMap(tick -> manageElevatorTransfers().onErrorResume(e -> Mono.empty()))
                 .subscribeOn(Schedulers.boundedElastic())
-                .subscribe();
+                .subscribe(null, e -> log.error("Error in manageElevatorTransfers", e));
 
         // Sell station's inventory every 30 seconds
         Flux.interval(Duration.ofSeconds(30))
-                .flatMap(tick -> sellStationInventory())
+                .flatMap(tick -> sellStationInventory().onErrorResume(e -> Mono.empty()))
                 .subscribeOn(Schedulers.boundedElastic())
-                .subscribe();
+                .subscribe(null, e -> log.error("Error in sellStationInventory", e));
 
-        //to verify if we can ship goods
         Flux.interval(Duration.ofSeconds(45))
-                .flatMap(tick -> dispatchShipToEarth())
+                .flatMap(tick -> dispatchShipToEarth().onErrorResume(e -> Mono.empty()))
                 .subscribeOn(Schedulers.boundedElastic())
-                .subscribe();
-        log.info("All trading pipelines launched");
+                .subscribe(null, e -> log.error("Error in dispatchShipToEarth", e));
+
+        log.info("All trading pipelines and queue consumers launched");
     }
 
-    // ─── SSE reaction ─────────────────────────────────────────────────────────
-
     private void onTradeEvent(TradeEvent event) {
-        priceHistory.computeIfAbsent(event.goodName(), k -> new ArrayDeque<>(20))
-                .offer(event.price());
-        // Keep only last 20 data points
+        priceHistory.computeIfAbsent(event.goodName(), k -> new ArrayDeque<>(20)).offer(event.price());
         Deque<Double> hist = priceHistory.get(event.goodName());
         while (hist.size() > 20) hist.poll();
     }
 
-    // ─── Market scan ──────────────────────────────────────────────────────────
+    // ─── LOGIQUE DES CONSOMMATEURS ──────────────────────────────────────────
+
+    private Mono<Void> processDelivery(DeliveryTask task) {
+        if (blockedSales.contains(task.goodName())) {
+            log.debug("Delivery ignored: {} is blocked for construction.", task.goodName());
+            return Mono.empty();
+        }
+
+        if (ships.getShipStatuses().size() >= config.getMaxConcurrentShips()) {
+            log.debug("Delivery ignored: No ships available.");
+            return Mono.empty();
+        }
+
+        log.info("Processing delivery: Selling {}x {} to {}", task.quantity(), task.goodName(), task.targetPlanetId());
+        long sellPrice = (long) Math.floor(task.sellPrice());
+
+        return market.placeSellOrder(task.goodName(), sellPrice, task.quantity(), myPlanetId)
+                .delayElement(Duration.ofSeconds(2))
+                .flatMap(order -> ships.hireTrucking(myPlanetId, task.targetPlanetId(), Map.of(task.goodName(), task.quantity())))
+                .then()
+                .onErrorResume(e -> Mono.empty());
+    }
+
+    private Mono<Void> processConstruction(ConstructionTask task) {
+        log.info("Processing construction project: {} on {}", task.projectType(), task.targetPlanetId());
+
+        task.requiredResources().forEach((good, qty) -> {
+            blockedSales.add(good);
+            reservedForBuild.put(good, qty);
+        });
+
+        UpgradeStationRequest upgradeReq = new UpgradeStationRequest(task.targetPlanetId(), task.projectType());
+        return api.upgradeStation(upgradeReq)
+                .doOnSuccess(res -> {
+                    log.info("Upgrade {} successful!", task.projectType());
+                    task.requiredResources().keySet().forEach(blockedSales::remove);
+                    task.requiredResources().keySet().forEach(reservedForBuild::remove);
+                })
+                .doOnError(e -> {
+                    log.warn("Upgrade {} failed, keeping locks. Need more resources?", task.projectType());
+                })
+                .then()
+                .onErrorResume(e -> Mono.empty());
+    }
+
+    // ─── SCANNERS ─────────────────────────────────────────────────────────────
+
+    private Mono<Void> scanMarketForDeliveries() {
+        return api.getMarketPrices()
+                .flatMap(prices -> Flux.fromIterable(prices.keySet())
+                        .flatMap(good -> api.getOrderBook(good).onErrorResume(e -> Mono.empty()), 5)
+                        .filter(book -> book.bids() != null && !book.bids().isEmpty())
+                        .doOnNext(book -> {
+                            OrderBookLevel bestBid = book.bids().get(0);
+                            if (bestBid.price() > 0) {
+                                // On utilise Sol-4 (Mars) comme cible valide
+                                DeliveryTask task = new DeliveryTask(book.goodName(), 10, "Sol-4", bestBid.price());
+                                deliveryQueue.tryEmitNext(task);
+                            }
+                        })
+                        .then());
+    }
+
+    private Mono<Void> scanStationForUpgrades() {
+        if (mySystemName == null || myPlanetId == null) return Mono.empty();
+
+        return api.getStation(mySystemName, myPlanetId)
+                .doOnNext(station -> {
+                    long totalItems = station.inventory().values().stream().mapToLong(Long::longValue).sum();
+                    long maxStorage = station.maxStorage();
+
+                    if (totalItems >= maxStorage * 0.9) {
+                        Map<String, Long> requiredForStorage = Map.of("iron_ore", 100L);
+                        constructionQueue.tryEmitNext(new ConstructionTask(myPlanetId, "storage_upgrade", requiredForStorage));
+                    } else if (totalItems == 0) {
+                        Map<String, Long> requiredForElevator = Map.of("steel", 200L);
+                        constructionQueue.tryEmitNext(new ConstructionTask(myPlanetId, "space_elevator", requiredForElevator));
+                    }
+                })
+                .then();
+    }
+
+    // ─── FONCTIONS D'ORIGINE CONSERVÉES ───────────────────────────────────────
 
     private Mono<Void> scanAndTrade() {
         return api.getMarketPrices()
                 .flatMap(prices -> {
                     if (prices.isEmpty()) return Mono.empty();
 
-                    // Find goods with a favorable spread by checking order books in parallel
                     List<String> goods = new ArrayList<>(prices.keySet());
                     return Flux.fromIterable(goods)
                             .flatMap(good -> api.getOrderBook(good)
                                     .map(book -> evaluateSpread(good, book))
-                                    .onErrorResume(e -> Mono.empty()), 5)  // max 5 parallel
+                                    .onErrorResume(e -> Mono.empty()), 5)
                             .filter(opp -> opp != null)
                             .sort(Comparator.comparingDouble(Opportunity::estimatedProfit).reversed())
                             .next()
-                            .flatMap(opp -> executeOpportunity(opp));
+                            .flatMap(this::executeOpportunity);
                 })
                 .then();
     }
 
     private record Opportunity(String goodName, double buyPrice, double sellPrice,
-                                long quantity, double estimatedProfit) {}
+                               long quantity, double estimatedProfit) {}
 
     private Opportunity evaluateSpread(String goodName, OrderBook book) {
         if (book.asks() == null || book.asks().isEmpty()) return null;
         if (book.bids() == null || book.bids().isEmpty()) return null;
 
-        double bestAsk = book.asks().get(0).price();       // cheapest seller
-        double bestBid = book.bids().get(0).price();       // highest buyer
+        double bestAsk = book.asks().get(0).price();
+        double bestBid = book.bids().get(0).price();
 
         double spread = bestBid - bestAsk;
         double marginPct = bestAsk > 0 ? spread / bestAsk : 0;
@@ -211,19 +311,16 @@ public class TradingStrategy {
         if (marginPct < config.getMinProfitMargin()) return null;
 
         long availableQty = Math.min(book.asks().get(0).totalQuantity(),
-                                    book.bids().get(0).totalQuantity());
+                book.bids().get(0).totalQuantity());
         long maxAffordable = (long)(myCredits * config.getMaxOrderCreditsPct() / bestAsk);
         long qty = Math.min(availableQty, Math.max(1, maxAffordable));
 
-        double estimatedProfit = qty * spread * 0.9; // 90% fill assumption
-        return new Opportunity(goodName, bestAsk, bestBid, qty, estimatedProfit);
+        double estimatedProfit = qty * spread * 0.9;
+        return (qty > 0) ? new Opportunity(goodName, bestAsk, bestBid, qty, estimatedProfit) : null;
     }
 
     private Mono<Void> executeOpportunity(Opportunity opp) {
-        if (ships.getShipStatuses().size() >= config.getMaxConcurrentShips()) {
-            log.debug("Maximum active ships reached. Waiting for current deliveries...");
-            return Mono.empty();
-        }
+        if (ships.getShipStatuses().size() >= config.getMaxConcurrentShips()) return Mono.empty();
 
         return Flux.fromIterable(galaxy.getConnectedPlanets().values())
                 .filter(p -> !p.id().equals(myPlanetId))
@@ -231,22 +328,13 @@ public class TradingStrategy {
                 .flatMap(targetPlanet -> {
                     long buyPrice = (long) Math.ceil(opp.buyPrice());
 
-                    log.info("Interplanetary Trade: Buying {}x {} @ {} on {}",
-                            opp.quantity(), opp.goodName(), buyPrice, targetPlanet.name());
-
                     return market.placeBuyOrder(opp.goodName(), buyPrice, opp.quantity(), targetPlanet.id())
                             .doOnNext(o -> openOrders.put(o.id(), o))
                             .delayElement(Duration.ofSeconds(5))
-                            .flatMap(order -> {
-                                log.info("Hiring trucking ship to transport {} from {} to {}",
-                                        opp.goodName(), targetPlanet.name(), mySystemName);
-                                return ships.hireTrucking(targetPlanet.id(), myPlanetId, Map.of(opp.goodName(), opp.quantity()));
-                            });
+                            .flatMap(order -> ships.hireTrucking(targetPlanet.id(), myPlanetId, Map.of(opp.goodName(), opp.quantity())));
                 })
                 .then();
     }
-
-    // ─── Order monitoring ─────────────────────────────────────────────────────
 
     private Mono<Void> refreshOpenOrders() {
         return api.getOrders()
@@ -254,48 +342,37 @@ public class TradingStrategy {
                 .doOnNext(order -> {
                     openOrders.put(order.id(), order);
                     if ("filled".equals(order.status()) || "cancelled".equals(order.status())) {
-                        log.debug("Order {} is {}", order.id(), order.status());
                         openOrders.remove(order.id());
                     }
                 })
                 .then();
     }
 
-    // ─── Trade requests ───────────────────────────────────────────────────────
-
     private Mono<Void> manageTradeRequests() {
         return api.getTradeRequests()
                 .flatMap(requests -> {
-                    boolean hasActive = requests.stream()
-                            .anyMatch(r -> "active".equals(r.status()));
-
+                    boolean hasActive = requests.stream().anyMatch(r -> "active".equals(r.status()));
                     if (!hasActive) {
-                        log.info("No active trade requests, seeding export...");
+                        // FIX DEFINITIF: iron_ore (nom correct) + total (mode supporté par le serveur)
                         TradeRequestCreate req = new TradeRequestCreate(
                                 myPlanetId, "iron_ore", "export",
-                                "standing", 5, null, null);
+                                "total", 5, null, null);
                         return api.createTradeRequest(req)
-                                .doOnNext(r -> log.info("Created trade request {}", r.id()))
+                                .doOnSuccess(r -> log.info("Trade request created: iron_ore (total mode)"))
                                 .then();
                     }
                     return Mono.empty();
                 });
     }
 
-    //Add new mission if no one from earth is buying form us
     private Mono<Void> dispatchShipToEarth() {
         if (mySystemName == null || myPlanetId == null) return Mono.empty();
-
-        if (!ships.getShipStatuses().isEmpty()) {
-            return Mono.empty();
-        }
+        if (!ships.getShipStatuses().isEmpty()) return Mono.empty();
 
         return api.getStation(mySystemName, myPlanetId)
                 .flatMap(station -> {
                     long ironQty = station.inventory().getOrDefault("iron_ore", 0L);
-
                     if (ironQty >= 500) {
-                        log.info("📦 Enough iron_ore accumulated. Dispatching a cargo ship to Earth (Sol-3)!");
                         return ships.hireTrucking(myPlanetId, "Sol-3", Map.of("iron_ore", 500L)).then();
                     }
                     return Mono.empty();
@@ -303,14 +380,12 @@ public class TradingStrategy {
                 .onErrorResume(e -> Mono.empty());
     }
 
-    // for credits update
     private Mono<Void> refreshPlayerProfile() {
         return api.getPlayer()
                 .doOnNext(player -> this.myCredits = player.credits())
                 .then();
     }
 
-    //for spatial elevator usage
     private Mono<Void> manageElevatorTransfers() {
         if (mySystemName == null || myPlanetId == null) return Mono.empty();
 
@@ -334,19 +409,14 @@ public class TradingStrategy {
                         }
 
                         if (!itemsToTransfer.isEmpty()) {
-                            log.info("Elevator: Transferring {} units to orbit...", currentLoad);
                             return elevator.transferToOrbit(mySystemName, myPlanetId, itemsToTransfer).then();
                         }
                     }
                     return Mono.empty();
                 })
-                .onErrorResume(e -> {
-                    log.warn("Elevator check failed: {}", e.getMessage());
-                    return Mono.empty();
-                });
+                .onErrorResume(e -> Mono.empty());
     }
 
-    //for automatic inventory sell
     private Mono<Void> sellStationInventory() {
         if (mySystemName == null || myPlanetId == null) return Mono.empty();
 
@@ -356,14 +426,14 @@ public class TradingStrategy {
 
                     return Flux.fromIterable(station.inventory().entrySet())
                             .filter(entry -> entry.getValue() > 0)
-                            .filter(entry -> !"iron_ore".equals(entry.getKey()))
+                            .filter(entry -> !entry.getKey().equals("iron_ore")) // Protection stock de base
+                            .filter(entry -> !blockedSales.contains(entry.getKey()))
                             .flatMap(entry -> {
                                 String good = entry.getKey();
                                 long qty = entry.getValue();
                                 Double currentPrice = market.getPrice(good);
                                 long sellPrice = (currentPrice != null) ? Math.round(currentPrice) : 10L;
 
-                                log.info("Selling inventory: {}x {} @ {}", qty, good, sellPrice);
                                 return market.placeSellOrder(good, sellPrice, qty, myPlanetId);
                             })
                             .then();
