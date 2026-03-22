@@ -123,7 +123,7 @@ public class TradingStrategy {
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe();
 
-        // 5. Goal evaluation & Reservations (Step 1)
+        // 5. Goal evaluation & Reservations
         Flux.interval(Duration.ofSeconds(30))
                 .flatMap(tick -> evaluateGoals())
                 .subscribeOn(Schedulers.boundedElastic())
@@ -135,7 +135,7 @@ public class TradingStrategy {
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe();
 
-        // 7. Internal Logistics (Step 2)
+        // 7. Internal Logistics
         Flux.interval(Duration.ofSeconds(45))
                 .flatMap(tick -> manageInternalLogistics())
                 .subscribeOn(Schedulers.boundedElastic())
@@ -153,7 +153,7 @@ public class TradingStrategy {
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe();
 
-        // 10. Status Report every 2 minutes
+        // 10. Status Report every 3 minutes
         Flux.interval(Duration.ofMinutes(3))
                 .flatMap(tick -> printStationStatusReport())
                 .subscribeOn(Schedulers.boundedElastic())
@@ -258,17 +258,15 @@ public class TradingStrategy {
     }
 
     /**
-     * DYNAMIC ECONOMY SEEDING (Step 3)
+     * DYNAMIC ECONOMY SEEDING
      * Creates an IMPORT request to force the planet's economy to produce goods and put them in our warehouse.
      */
     private Mono<Void> manageTradeRequests() {
         return api.getTradeRequests()
                 .flatMap(requests -> {
-                    // Check if we already have an active request
                     boolean hasActive = requests.stream().anyMatch(r -> "active".equals(r.status()));
                     if (hasActive) return Mono.empty();
 
-                    // Proxima b is an arctic planet, let's extract water or whatever is most expensive
                     Map<String, Double> prices = market.getLastPrices();
                     String bestGood = "water";
 
@@ -279,8 +277,7 @@ public class TradingStrategy {
                                 .orElse("water");
                     }
 
-                    log.info("📈 Economy Seeding: Creating standing IMPORT request for '{}' to extract resources...", bestGood);
-                    // CRITICAL FIX: Direction is "import" to receive goods into the warehouse!
+                    log.info("Economy Seeding: Creating standing IMPORT request for '{}' to extract resources...", bestGood);
                     TradeRequestCreate req = new TradeRequestCreate(
                             myPlanetId, bestGood, "import", "standing", 10, null, null);
 
@@ -318,7 +315,7 @@ public class TradingStrategy {
                                         .orElse(null);
 
                                 if (destination != null) {
-                                    log.info("🚚 Logistics: Shipping {} units of {} from {} to {} (Demand Match)",
+                                    log.info("Logistics: Shipping {} units of {} from {} to {} (Demand Match)",
                                             qtyToMove, good, originPlanet.name(), destination.name());
                                     return ships.hireTrucking(originPlanet.id(), destination.id(), Map.of(good, qtyToMove));
                                 }
@@ -330,41 +327,36 @@ public class TradingStrategy {
 
     /**
      * PERIODIC STATUS REPORT
-     * Prints the current state of the station's inventory and credits every 2 minutes.
+     * Prints the current state of the station's inventory and credits every 3 minutes.
      */
     private Mono<Void> printStationStatusReport() {
         if (mySystemName == null || myPlanetId == null) return Mono.empty();
 
         return api.getStation(mySystemName, myPlanetId)
                 .doOnNext(station -> {
-                    log.info("📊 --- STATUS REPORT ---");
-                    log.info("📊 Credits: {}", myCredits);
-                    log.info("📊 Station: {} on {}", station.name(), myPlanetId);
-                    log.info("📊 Inventory:");
+                    log.info("--- STATUS REPORT ---");
+                    log.info("Credits: {}", myCredits);
+                    log.info("Station: {} on {}", station.name(), myPlanetId);
+                    log.info("Inventory:");
                     if (station.inventory() != null && !station.inventory().isEmpty()) {
                         station.inventory().forEach((good, qty) ->
-                                log.info("📊   - {}: {}", good, qty)
+                                log.info("  - {}: {}", good, qty)
                         );
                     } else {
-                        log.info("📊   (Empty)");
+                        log.info("  (Empty)");
                     }
-                    log.info("📊 -----------------------");
+                    log.info("-----------------------");
                 })
                 .then();
     }
 
     /**
      * GOAL EVALUATION
-     * Checks if we need to upgrade the station or expand.
-     */
-    /**
-     * GOAL EVALUATION
-     * Checks if we need to upgrade the station or expand.
+     * Checks if we need to upgrade the station or expand to new planets.
      */
     private Mono<Void> evaluateGoals() {
         if (mySystemName == null || myPlanetId == null) return Mono.empty();
 
-        // If we already have a goal, try to execute it
         if (currentGoal != null) {
             return executeCurrentGoal();
         }
@@ -373,9 +365,9 @@ public class TradingStrategy {
                 .flatMap(station -> {
                     long totalItems = station.inventory().values().stream().mapToLong(Long::longValue).sum();
 
-                    // Goal 1: Prevent storage overflow (Highest Priority)
+                    // Goal 1: Prevent storage overflow (Priority)
                     if (totalItems > station.maxStorage() * 0.8) {
-                        log.info("📦 Storage critical (>80%). Setting goal: Upgrade Storage.");
+                        log.info("Storage critical (>80%). Setting goal: Upgrade Storage.");
                         Map<String, Long> cost = Map.of("steel", 200L, "electronics", 50L);
                         currentGoal = new Goal("upgrade_storage", myPlanetId, 5000, cost);
                         reservedCredits = currentGoal.requiredCredits();
@@ -383,14 +375,14 @@ public class TradingStrategy {
                         return Mono.empty();
                     }
 
+                    // Goal 2: Expansion to new planets
                     if (myCredits > 20_000) {
                         return Flux.fromIterable(galaxy.getSystems().values())
                                 .flatMap(system -> Flux.fromIterable(system.planets()))
                                 .filter(p -> "settled".equals(p.status()) && p.station() == null)
-                                .next() // Prend la première qu'il trouve
+                                .next()
                                 .doOnNext(targetPlanet -> {
-                                    log.info("🔭 Wealth accumulated! Setting goal: Expand to {} ({})", targetPlanet.name(), targetPlanet.id());
-                                    // Costs are examples, adjust based on the game's actual cost
+                                    log.info("Wealth accumulated! Setting goal: Expand to {} ({})", targetPlanet.name(), targetPlanet.id());
                                     Map<String, Long> cost = Map.of("steel", 500L, "electronics", 200L);
                                     currentGoal = new Goal("install_station", targetPlanet.id(), 15000, cost);
                                     reservedCredits = currentGoal.requiredCredits();
@@ -404,21 +396,18 @@ public class TradingStrategy {
     }
 
     /**
-     * GOAL EXECUTION (Step 3)
-     * Checks if we have the funds and materials. If materials are missing, buys them.
-     * If everything is ready, triggers the construction API.
+     * GOAL EXECUTION
+     * Checks requirements and triggers the construction API.
      */
     private Mono<Void> executeCurrentGoal() {
         return api.getStation(mySystemName, myPlanetId)
                 .flatMap(station -> {
-                    // 1. Check if we have enough credits
                     if (myCredits < currentGoal.requiredCredits()) {
-                        log.debug("⏳ Goal '{}' pending: Not enough credits. Have {}, need {}",
+                        log.debug("Goal '{}' pending: Not enough credits. Have {}, need {}",
                                 currentGoal.type(), myCredits, currentGoal.requiredCredits());
                         return Mono.empty();
                     }
 
-                    // 2. Check if we have the required materials in our station
                     for (Map.Entry<String, Long> req : currentGoal.requiredGoods().entrySet()) {
                         String good = req.getKey();
                         long requiredQty = req.getValue();
@@ -426,48 +415,39 @@ public class TradingStrategy {
 
                         if (availableQty < requiredQty) {
                             long missingQty = requiredQty - availableQty;
-                            log.debug("⏳ Goal '{}' pending: Missing {}x {} in station.",
+                            log.debug("Goal '{}' pending: Missing {}x {} in station.",
                                     currentGoal.type(), missingQty, good);
 
-                            // DYNAMIC MARKET REACTION: If we are missing goods for our goal, place a buy order!
-                            // We set a slightly higher price to ensure someone sells it to us.
                             Double marketPrice = market.getPrice(good);
                             long buyPrice = (marketPrice != null) ? Math.round(marketPrice * 1.2) : 50L;
 
-                            log.info("🛒 Goal needs materials! Placing buy order for {}x {} @ {}", missingQty, good, buyPrice);
+                            log.info("Goal needs materials! Placing buy order for {}x {} @ {}", missingQty, good, buyPrice);
                             return market.placeBuyOrder(good, buyPrice, missingQty, myPlanetId).then();
                         }
                     }
 
-                    // 3. All conditions met! Execute the construction
-                    log.info("🚀 All requirements met! Executing construction: {}", currentGoal.type());
+                    log.info("All requirements met! Executing construction: {}", currentGoal.type());
 
                     Mono<?> actionMono = Mono.empty();
 
-                    // Add other upgrade types here later (docking_bays, etc.)
                     if ("upgrade_storage".equals(currentGoal.type())) {
                         actionMono = api.upgradeStation(new UpgradeStationRequest(myPlanetId, "storage"));
-                    }
-
-                    else if ("install_station".equals(currentGoal.type())) {
-                        // The endpoint requires: source_planet_id, target_planet_id, station_name
+                    } else if ("install_station".equals(currentGoal.type())) {
                         Map<String, String> requestBody = Map.of(
                                 "source_planet_id", myPlanetId,
                                 "target_planet_id", currentGoal.targetPlanetId(),
                                 "station_name", "Beta Base Alpha"
                         );
-                        // Note: You might need to add this method to your ApiClient if it's not there!
                         actionMono = api.installStation(requestBody);
                     }
 
                     return actionMono.doOnSuccess(res -> {
-                        log.info("✅ Goal '{}' successfully executed!", currentGoal.type());
-                        // Reset goal and release reservations
+                        log.info("Goal '{}' successfully executed!", currentGoal.type());
                         currentGoal = null;
                         reservedCredits = 0;
                         reservedGoods.clear();
                     }).onErrorResume(e -> {
-                        log.error("❌ Failed to execute goal '{}': {}", currentGoal.type(), e.getMessage());
+                        log.error("Failed to execute goal '{}': {}", currentGoal.type(), e.getMessage());
                         return Mono.empty();
                     }).then();
                 });
@@ -485,7 +465,6 @@ public class TradingStrategy {
 
                         for (Map.Entry<String, Long> entry : se.warehouse().inventory().entrySet()) {
                             long qtyInWarehouse = entry.getValue();
-                            // Grab everything we can fit in the cabin
                             if (qtyInWarehouse > 0 && load < capacity) {
                                 long qtyToTake = Math.min(qtyInWarehouse, capacity - load);
                                 items.add(new TransferItem(entry.getKey(), qtyToTake));
@@ -494,7 +473,7 @@ public class TradingStrategy {
                         }
 
                         if (!items.isEmpty()) {
-                            log.info("🚀 Elevator: Transferring {} units from warehouse to orbit.", load);
+                            log.info("Elevator: Transferring {} units from warehouse to orbit.", load);
                             return elevator.transferToOrbit(mySystemName, myPlanetId, items).then();
                         }
                     }
@@ -508,7 +487,7 @@ public class TradingStrategy {
 
     /**
      * ACTIVE SELLING (Hybrid: Market Taker & Market Maker)
-     * Sells to existing buyers if possible. Otherwise, places a limit order on the market.
+     * Sells to existing buyers if possible, otherwise places a limit order.
      */
     private Mono<Void> sellStationInventory() {
         if (mySystemName == null || myPlanetId == null) return Mono.empty();
@@ -523,34 +502,27 @@ public class TradingStrategy {
                                 String good = entry.getKey();
                                 long totalQty = entry.getValue();
 
-                                // 1. Safety Buffer
                                 long safetyBuffer = 500L;
                                 long reserved = reservedGoods.getOrDefault(good, 0L);
                                 long sellable = totalQty - reserved - safetyBuffer;
 
                                 if (sellable <= 0) return Mono.empty();
 
-                                // 2. Check the Order Book
                                 return api.getOrderBook(good).flatMap(book -> {
-
-                                    // Scenario A: There are actual buyers waiting! (Market Taker)
                                     if (book.bids() != null && !book.bids().isEmpty()) {
                                         double bestBidPrice = book.bids().get(0).price();
                                         long maxDemand = book.bids().get(0).totalQuantity();
                                         long qtyToSell = Math.min(sellable, Math.min(maxDemand, 500L));
 
-                                        log.info("🤝 INSTANT PROFIT! Found a buyer for {}. Selling {} units @ {}.",
+                                        log.info("INSTANT PROFIT! Found a buyer for {}. Selling {} units @ {}.",
                                                 good, qtyToSell, bestBidPrice);
                                         return market.placeSellOrder(good, (long) bestBidPrice, qtyToSell, myPlanetId);
-                                    }
-                                    // Scenario B: No buyers right now. We place an ad on the market! (Market Maker)
-                                    else {
+                                    } else {
                                         long qtyToSell = Math.min(sellable, 500L);
                                         Double marketPrice = market.getPrice(good);
-                                        // We set a base price, or use the last market price
                                         long sellPrice = (marketPrice != null) ? Math.round(marketPrice) : 10L;
 
-                                        log.info("📢 Market Maker: No active buyers. Placing Limit Sell Order for {}x {} @ {}.",
+                                        log.info("Market Maker: No active buyers. Placing Limit Sell Order for {}x {} @ {}.",
                                                 qtyToSell, good, sellPrice);
                                         return market.placeSellOrder(good, sellPrice, qtyToSell, myPlanetId);
                                     }
