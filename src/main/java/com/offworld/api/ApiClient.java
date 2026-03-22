@@ -300,6 +300,9 @@ public class ApiClient {
     public Mono<ConstructionProject> upgradeElevator(String planetId) {
         return post("/construction/upgrade-elevator", Map.of("planet_id", planetId), new TypeReference<>() {});
     }
+    public Mono<ConstructionProject> installStation(Map<String, String> request) {
+        return post("/construction/install-station", request, new TypeReference<>() {});
+    }
 
     // ─── Player ───────────────────────────────────────────────────────────────
 
