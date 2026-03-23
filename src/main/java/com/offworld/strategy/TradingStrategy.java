@@ -341,32 +341,6 @@ public class TradingStrategy {
         return (qty > 0) ? new Opportunity(goodName, bestAsk, bestBid, qty, estimatedProfit) : null;
     }
 
-    private Mono<Void> executeOpportunity(Opportunity opp) {
-        if (ships.getShipStatuses().size() >= config.getMaxConcurrentShips()) {
-            log.debug("Ship limit reached. Skipping trade opportunity.");
-            return Mono.empty();
-        }
-
-        return Flux.fromIterable(galaxy.getConnectedPlanets().values())
-                .filter(p -> !p.id().equals(myPlanetId))
-                .next()
-                .flatMap(targetPlanet -> {
-                    long buyPrice = (long) Math.ceil(opp.buyPrice());
-                    log.info("Interplanetary Trade: Buying {}x {} @ {} on {}",
-                            opp.quantity(), opp.goodName(), buyPrice, targetPlanet.name());
-
-                    return market.placeBuyOrder(opp.goodName(), buyPrice, opp.quantity(), targetPlanet.id())
-                            .doOnNext(o -> openOrders.put(o.id(), o))
-                            .delayElement(Duration.ofSeconds(5))
-                            .flatMap(order -> {
-                                log.info("Hiring trucker for {} from {} to {}",
-                                        opp.goodName(), targetPlanet.name(), myPlanetId);
-                                return ships.hireTrucking(targetPlanet.id(), myPlanetId, Map.of(opp.goodName(), opp.quantity()));
-                            });
-                })
-                .then();
-    }
-
     private Mono<Void> refreshOpenOrders() {
         return api.getOrders()
                 .flatMapMany(Flux::fromIterable)
@@ -404,11 +378,37 @@ public class TradingStrategy {
         .onErrorResume(e -> Mono.empty());
     }
 
-    /**
-     * GOAL EVALUATION
-     * Checks if we need to upgrade the station or expand to new planets.
-     */
-    private Mono<Void> evaluateGoals() {
+    private Mono<Void> executeOpportunity(Opportunity opp) {
+        if (ships.getShipStatuses().size() >= config.getMaxConcurrentShips()) {
+            log.debug("Ship limit reached. Skipping trade opportunity.");
+            return Mono.empty();
+        }
+
+        return Flux.fromIterable(galaxy.getConnectedPlanets().values())
+                .filter(p -> !p.id().equals(myPlanetId))
+                .next()
+                .switchIfEmpty(Mono.defer(() -> {
+                    log.warn("Opportunité annulée pour {} : aucune planète valide trouvée.", opp.goodName());
+                    return Mono.empty();
+                }))
+                .flatMap(targetPlanet -> {
+                    long buyPrice = (long) Math.ceil(opp.buyPrice());
+                    log.info("Interplanetary Trade: Buying {}x {} @ {} on {}",
+                            opp.quantity(), opp.goodName(), buyPrice, targetPlanet.name());
+
+                    return market.placeBuyOrder(opp.goodName(), buyPrice, opp.quantity(), targetPlanet.id())
+                            .doOnNext(o -> openOrders.put(o.id(), o))
+                            .delayElement(Duration.ofSeconds(5))
+                            .flatMap(order -> {
+                                log.info("Hiring trucker for {} from {} to {}",
+                                        opp.goodName(), targetPlanet.name(), myPlanetId);
+                                return ships.hireTrucking(targetPlanet.id(), myPlanetId, Map.of(opp.goodName(), opp.quantity()));
+                            });
+                })
+                .then();
+    }
+
+    private Mono<Void> dispatchShipToEarth() {
         if (mySystemName == null || myPlanetId == null) return Mono.empty();
         if (!ships.getShipStatuses().isEmpty()) return Mono.empty();
 
@@ -497,7 +497,7 @@ public class TradingStrategy {
                                 long totalQty = entry.getValue();
 
                                 long safetyBuffer = 500L;
-                                long reserved = reservedGoods.getOrDefault(good, 0L);
+                                long reserved = reservedForBuild.getOrDefault(good, 0L);
                                 long sellable = totalQty - reserved - safetyBuffer;
 
                                 if (sellable <= 0) return Mono.empty();

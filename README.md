@@ -170,7 +170,7 @@ Operational Loops
 - Validation Constraints: Logistics are currently hard-wired to Sol-3 targets. Trade requests are currently strictly bound to iron_ore using the total variant to satisfy server-side requirements.
 
 >>>>>>> 9b2d485aa087cef837107732182075d228359eb2
----
+---di
 
 ## Interaction Patterns
 
