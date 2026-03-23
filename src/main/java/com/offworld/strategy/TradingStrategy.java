@@ -48,15 +48,19 @@ public class TradingStrategy {
 
     // Track recent prices per good from SSE
     private final Map<String, Deque<Double>> priceHistory = new ConcurrentHashMap<>();
-    // Track our own open orders: orderId -> order
     private final Map<String, MarketOrder> openOrders = new ConcurrentHashMap<>();
-    // Active trucking ship count
     private final AtomicInteger activeShips = new AtomicInteger(0);
 
-    // The planet ID of our main station
     private String myPlanetId;
     private String mySystemName;
     private long myCredits;
+
+    // Reservation System (Step 1)
+    private Goal currentGoal = null;
+    private final Map<String, Long> reservedGoods = new ConcurrentHashMap<>();
+    private long reservedCredits = 0;
+
+    private record Goal(String type, String targetPlanetId, long requiredCredits, Map<String, Long> requiredGoods) {}
 
     public TradingStrategy(ApiClient api, AppConfig config, GalaxyService galaxy,
                            MarketService market, ShipService ships, ElevatorService elevator) {
@@ -83,10 +87,10 @@ public class TradingStrategy {
                 .then(galaxy.exploreGalaxy()
                         .doOnNext(p -> {
                             Station st = p.station();
-                            log.info("Planet: {} | Station: {} | OwnerId: {}",
+                            log.info("Planet discovered: {} | Station: {} | Owner: {}",
                                     p.name(),
-                                    st != null ? st.name() : "NULL",
-                                    st != null ? st.ownerId() : "NULL");
+                                    st != null ? st.name() : "NONE",
+                                    st != null ? st.ownerId() : "NONE");
                         })
                         .filter(p -> {
                             Station st = p.station();
@@ -97,8 +101,8 @@ public class TradingStrategy {
                         .doOnNext(planet -> {
                             myPlanetId = planet.id();
                             mySystemName = galaxy.getSystemForPlanet(planet.id());
-                            log.info("My station: {} on planet {} in system {}",
-                                    planet.station().name(), mySystemName);
+                            log.info("My station confirmed: {} on planet {} in system {}",
+                                    planet.station().name(), myPlanetId, mySystemName);
                         }))
                 .then();
     }
@@ -138,26 +142,21 @@ public class TradingStrategy {
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe(null, e -> log.error("Error in scanStationForUpgrades loop", e));
 
-        // 3. Monitor our orders
+        // 3. Monitor orders
         Flux.interval(Duration.ofSeconds(30))
                 .flatMap(tick -> refreshOpenOrders().onErrorResume(e -> Mono.empty()))
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe(null, e -> log.error("Error in refreshOpenOrders loop", e));
 
-        // 4. Seed trade requests to generate supply
+        // 4. Trade requests (Economy seeding)
         Flux.interval(Duration.ofMillis(config.getTradeRequestIntervalMs()))
                 .flatMap(tick -> manageTradeRequests().onErrorResume(e -> Mono.empty()))
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe(null, e -> log.error("Error in manageTradeRequests loop", e));
 
-        // 5. Leaderboard check
-        Flux.interval(Duration.ofMinutes(1))
-                .flatMap(tick -> api.getLeaderboard())
-                .doOnNext(board -> board.stream()
-                        .filter(e -> e.playerId().equals(config.getPlayerId()))
-                        .findFirst()
-                        .ifPresent(e -> log.info("Leaderboard: rank={}, profit={}",
-                                board.indexOf(e) + 1, e.profit())))
+        // 5. Goal evaluation & Reservations
+        Flux.interval(Duration.ofSeconds(30))
+                .flatMap(tick -> evaluateGoals())
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe(null, e -> log.error("Error in leaderboard check", e));
 
@@ -167,7 +166,13 @@ public class TradingStrategy {
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe(null, e -> log.error("Error in refreshPlayerProfile", e));
 
-        // 7. Check the surface and use the elevator every 20 seconds
+        // 7. Internal Logistics
+        Flux.interval(Duration.ofSeconds(45))
+                .flatMap(tick -> manageInternalLogistics())
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe();
+
+        // 8. Elevator transfers
         Flux.interval(Duration.ofSeconds(20))
                 .flatMap(tick -> manageElevatorTransfers().onErrorResume(e -> Mono.empty()))
                 .subscribeOn(Schedulers.boundedElastic())
@@ -321,6 +326,8 @@ public class TradingStrategy {
         double bestAsk = book.asks().get(0).price();
         double bestBid = book.bids().get(0).price();
 
+        double bestAsk = book.asks().get(0).price();
+        double bestBid = book.bids().get(0).price();
         double spread = bestBid - bestAsk;
         double marginPct = bestAsk > 0 ? spread / bestAsk : 0;
 
@@ -410,9 +417,9 @@ public class TradingStrategy {
                                         ships.hireTrucking(myPlanetId, targetPlanet.id(), Map.of(resourceToSend.getKey(), 500L)).then()
                                 );
                     }
+
                     return Mono.empty();
-                })
-                .onErrorResume(e -> Mono.empty());
+                });
     }
 
     private Mono<Void> refreshPlayerProfile() {
@@ -427,19 +434,16 @@ public class TradingStrategy {
         return api.getSpaceElevator(mySystemName, myPlanetId)
                 .flatMap(se -> {
                     if (se.warehouse() != null && config.getPlayerId().equals(se.warehouse().ownerId())) {
-                        List<TransferItem> itemsToTransfer = new ArrayList<>();
+                        List<TransferItem> items = new ArrayList<>();
                         long capacity = se.config().cabinCapacity();
-                        long currentLoad = 0;
+                        long load = 0;
 
                         for (Map.Entry<String, Long> entry : se.warehouse().inventory().entrySet()) {
-                            String good = entry.getKey();
-                            long qty = entry.getValue();
-
-                            if (qty > 1 && currentLoad < capacity) {
-                                long availableToTransfer = qty - 1;
-                                long transferQty = Math.min(availableToTransfer, capacity - currentLoad);
-                                itemsToTransfer.add(new TransferItem(good, transferQty));
-                                currentLoad += transferQty;
+                            long qtyInWarehouse = entry.getValue();
+                            if (qtyInWarehouse > 0 && load < capacity) {
+                                long qtyToTake = Math.min(qtyInWarehouse, capacity - load);
+                                items.add(new TransferItem(entry.getKey(), qtyToTake));
+                                load += qtyToTake;
                             }
                         }
 

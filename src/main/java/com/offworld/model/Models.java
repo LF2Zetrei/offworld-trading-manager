@@ -24,8 +24,11 @@ public final class Models {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Economy(
-            long credits,
-            @JsonProperty("tax_rate") double taxRate) {}
+            @JsonProperty("last_available_supply") Map<String, Double> supply,
+            @JsonProperty("last_demand") Map<String, Double> demand,
+            double wealth,
+            @JsonProperty("tax_rate") double taxRate
+    ) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Settlement(
