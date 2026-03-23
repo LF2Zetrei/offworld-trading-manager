@@ -131,6 +131,7 @@ java -jar target/offworld-trading-manager-1.0.0-jar-with-dependencies.jar
 
 ### Trading Strategy
 
+<<<<<<< HEAD
 The strategy runs three parallel loops:
 - **SSE reaction** — updates price history on every trade event
 - **Market scan** — every 10s, checks order books for profitable spreads and places limit buy+sell pairs
@@ -142,6 +143,33 @@ The application implements a sophisticated autonomous loop:
     - **Market Taker**: Sells instantly to existing buyers (Bids) for immediate profit.
     - **Market Maker**: Places Limit Sell orders for excess stock while maintaining a 500-unit safety buffer.
 - **Infrastructure Expansion** —  Automatically detects "Settled" planets and triggers station construction once credit and resource thresholds are met.
+=======
+The strategy is currently implemented as a deterministic "Seed & Trade" loop, focusing on specific resource cycles and hardcoded logistics to validate the five interaction patterns.
+Operational Loops
+
+ - SSE Price Monitoring — Continuously listens to `GET /market/trades` to populate a local `priceHistory` buffer (last 20 points). This builds the data foundation for future spread analysis.
+
+ - Fixed-Target Market Scanning — Every 10s, the client polls order books for all known commodities. It attempts to find a 10% profit margin to place limit buy/sell order pairs. In the absence of market data, it defaults to a baseline sell price (10 credits).
+
+ - Hardcoded Supply Seeding — The strategy attempts to maintain a continuous supply of `iron_ore` via the `/trade` endpoint. It uses the `total` mode in `export` direction to generate local inventory, ensuring compatibility with the current server's strict validation.
+
+ - Automated Earth Dispatch — A dedicated monitor checks the station's inventory for `iron_ore`. Once 500 units are accumulated, it triggers a `POST /trucking` request to "Sol-3" (Earth).
+
+#### Interaction Patterns in Use
+
+- Resource Protection — The sellStationInventory loop is configured to liquidate all assets (Water, Food, etc.) while specifically protecting the iron_ore stock for the Earth dispatch mission.
+
+- Space Elevator Logistics — Implements a periodic warehouse-to-orbit transfer. It identifies surplus stock in the planetary warehouse and uses the blocking POST /space-elevator pattern to move goods to the station.
+
+- Error Handling & Resilience — Uses Project Reactor's onErrorResume and retryWhen operators to ensure the main pipelines (Market Scan, Trade Requests) stay alive even when the server returns 400 or 422 errors due to API mismatches.
+
+#### Current Behavior Notes (Development State)
+
+- Market Cold-Start: As the global market currently returns empty sets, the strategy focuses on placing initial liquidity orders at floor prices.
+
+- Validation Constraints: Logistics are currently hard-wired to Sol-3 targets. Trade requests are currently strictly bound to iron_ore using the total variant to satisfy server-side requirements.
+
+>>>>>>> 9b2d485aa087cef837107732182075d228359eb2
 ---
 
 ## Interaction Patterns
