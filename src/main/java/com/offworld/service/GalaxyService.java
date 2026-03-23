@@ -83,12 +83,19 @@ public class GalaxyService {
      * Find the system name for a given planet ID.
      */
     public String getSystemForPlanet(String planetId) {
-        return systems.values().stream()
-                .filter(s -> s.planets() != null &&
-                             s.planets().stream().anyMatch(p -> p.id().equals(planetId)))
-                .map(StarSystem::name)
-                .findFirst()
-                .orElse(null);
+        if (systems == null) return null;
+
+        for (Map.Entry<String, StarSystem> entry : systems.entrySet()) {
+            StarSystem system = entry.getValue();
+            if (system.planets() != null) {
+                for (Planet planet : system.planets()) {
+                    if (planet.id().equals(planetId)) {
+                        return system.name();
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     /**

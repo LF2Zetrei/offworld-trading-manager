@@ -59,6 +59,14 @@ public class TradingStrategy {
     // Active trucking ship count
     private final AtomicInteger activeShips = new AtomicInteger(0);
 
+
+    // ─── GOAL SYSTEM (Added back for proper progression) ───────────────────────
+    private Goal currentGoal = null;
+    private final Map<String, Long> reservedGoods = new ConcurrentHashMap<>();
+    private long reservedCredits = 0;
+
+    private record Goal(String type, String targetPlanetId, long requiredCredits, Map<String, Long> requiredGoods) {}
+
     // The planet ID of our main station
     private String myPlanetId;
     private String mySystemName;
@@ -139,10 +147,10 @@ public class TradingStrategy {
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe(null, e -> log.error("Error in scanMarketForDeliveries loop", e));
 
-        Flux.interval(Duration.ofSeconds(45))
-                .flatMap(tick -> scanStationForUpgrades().onErrorResume(e -> Mono.empty()))
+        Flux.interval(Duration.ofSeconds(30))
+                .flatMap(tick -> evaluateGoals().onErrorResume(e -> Mono.empty()))
                 .subscribeOn(Schedulers.boundedElastic())
-                .subscribe(null, e -> log.error("Error in scanStationForUpgrades loop", e));
+                .subscribe(null, e -> log.error("Error in evaluateGoals loop", e));
 
         // 3. Monitor our orders
         Flux.interval(Duration.ofSeconds(30))
@@ -178,6 +186,12 @@ public class TradingStrategy {
                 .flatMap(tick -> manageElevatorTransfers().onErrorResume(e -> Mono.empty()))
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe(null, e -> log.error("Error in manageElevatorTransfers", e));
+
+        // 8. Status Report every 2 minutes
+        Flux.interval(Duration.ofMinutes(2))
+                .flatMap(tick -> printStationStatusReport().onErrorResume(e -> Mono.empty()))
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe(null, e -> log.error("Error in status report loop", e));
 
         // Sell station's inventory every 30 seconds
         Flux.interval(Duration.ofSeconds(30))
@@ -369,9 +383,9 @@ public class TradingStrategy {
                             return Mono.empty();
 
                         String firstAvailableResource = station.inventory().keySet().iterator().next();
-                        TradeRequestCreate req = new TradeRequestCreate(myPlanetId, firstAvailableResource, "export", "total", 5, null, null);
+                        TradeRequestCreate req = new TradeRequestCreate(myPlanetId, firstAvailableResource, "import", "standing", 5, null, null);
                         return api.createTradeRequest(req)
-                                .doOnSuccess(r -> log.info("Trade request created: {} (total mode)", firstAvailableResource))
+                                .doOnSuccess(r -> log.info("Trade request created: {} (standing mode)", firstAvailableResource))
                                 .then();
                     });
         })
@@ -397,6 +411,10 @@ public class TradingStrategy {
                             opp.quantity(), opp.goodName(), buyPrice, targetPlanet.name());
 
                     return market.placeBuyOrder(opp.goodName(), buyPrice, opp.quantity(), targetPlanet.id())
+                            .onErrorResume(e -> {
+                                log.warn("Skipping trade for {}: {}", opp.goodName(), e.getMessage());
+                                return Mono.empty();
+                            })
                             .doOnNext(o -> openOrders.put(o.id(), o))
                             .delayElement(Duration.ofSeconds(5))
                             .flatMap(order -> {
@@ -497,7 +515,7 @@ public class TradingStrategy {
                                 long totalQty = entry.getValue();
 
                                 long safetyBuffer = 500L;
-                                long reserved = reservedForBuild.getOrDefault(good, 0L);
+                                long reserved = reservedGoods.getOrDefault(good, 0L);
                                 long sellable = totalQty - reserved - safetyBuffer;
 
                                 if (sellable <= 0) return Mono.empty();
@@ -525,5 +543,163 @@ public class TradingStrategy {
                             .then();
                 })
                 .onErrorResume(e -> Mono.empty());
+    }
+    // ─── GOAL MANAGEMENT ─────────────────────────────────────────────
+
+    private Mono<Void> evaluateGoals() {
+        if (mySystemName == null || myPlanetId == null) return Mono.empty();
+
+        if (currentGoal != null) {
+            return executeCurrentGoal();
+        }
+
+        return api.getStation(mySystemName, myPlanetId)
+                .flatMap(station -> {
+                    long totalItems = station.inventory().values().stream().mapToLong(Long::longValue).sum();
+
+                    // Goal 1: Prevent storage overflow (Priority)
+                    if (totalItems > station.maxStorage() * 0.8) {
+                        log.info("Storage critical (>80%). Setting goal: Upgrade Storage.");
+                        Map<String, Long> cost = Map.of("steel", 200L, "electronics", 50L);
+                        currentGoal = new Goal("upgrade_storage", myPlanetId, 5000, cost);
+                        reservedCredits = currentGoal.requiredCredits();
+                        reservedGoods.clear(); // Reset before adding
+                        reservedGoods.putAll(currentGoal.requiredGoods());
+                        return Mono.empty();
+                    }
+
+                    // Goal 2: Expansion to new planets (Dynamic Search)
+                    if (myCredits > 50_000) {
+                        return Flux.fromIterable(galaxy.getSystems().values())
+                                .flatMap(system -> Flux.fromIterable(system.planets()))
+                                // We look for an empty planet to colonize
+                                .filter(p -> "uninhabited".equals(p.status()) && p.station() == null)
+                                .next()
+                                .doOnNext(targetPlanet -> {
+                                    log.info("Wealth accumulated! Setting goal: Expand to {} ({})", targetPlanet.name(), targetPlanet.id());
+                                    // Base cost for a settlement
+                                    Map<String, Long> cost = Map.of("steel", 1000L, "electronics", 500L, "food", 200L, "water", 200L);
+                                    currentGoal = new Goal("found_settlement", targetPlanet.id(), 30000, cost);
+                                    reservedCredits = currentGoal.requiredCredits();
+                                    reservedGoods.clear();
+                                    reservedGoods.putAll(currentGoal.requiredGoods());
+                                })
+                                .then();
+                    }
+
+                    return Mono.empty();
+                });
+    }
+
+    private Mono<Void> executeCurrentGoal() {
+        return api.getStation(mySystemName, myPlanetId)
+                .flatMap(station -> {
+                    if (myCredits < currentGoal.requiredCredits()) {
+                        log.debug("Goal '{}' pending: Not enough credits. Have {}, need {}",
+                                currentGoal.type(), myCredits, currentGoal.requiredCredits());
+                        return Mono.empty();
+                    }
+
+                    for (Map.Entry<String, Long> req : currentGoal.requiredGoods().entrySet()) {
+                        String good = req.getKey();
+                        long requiredQty = req.getValue();
+                        long availableQty = station.inventory().getOrDefault(good, 0L);
+
+                        long alreadyOrderedQty = openOrders.values().stream()
+                                .filter(o -> o.goodName().equals(good) && "buy".equals(o.side()))
+                                .mapToLong(o -> o.quantity() - o.filledQuantity())
+                                .sum();
+
+                        long totalIncoming = availableQty + alreadyOrderedQty;
+
+                        if (totalIncoming < requiredQty) {
+                            long missingQty = requiredQty - totalIncoming;
+                            log.debug("Goal '{}' pending: Missing {}x {} in station.", currentGoal.type(), missingQty, good);
+
+                            Double marketPrice = market.getPrice(good);
+                            long buyPrice = (marketPrice != null) ? Math.round(marketPrice * 1.2) : 50L;
+
+                            log.info("Goal needs materials! Placing buy order for {}x {} @ {}", missingQty, good, buyPrice);
+                            return market.placeBuyOrder(good, buyPrice, missingQty, myPlanetId)
+                                    .onErrorResume(e -> {
+                                        log.warn("Cannot buy {} right now. Reason: {}", good, e.getMessage());
+                                        return Mono.empty();
+                                    })
+                                    .doOnNext(o -> { if(o != null) openOrders.put(o.id(), o); })
+                                    .then();
+                        }
+                    }
+
+                    log.info("All requirements met! Executing construction: {}", currentGoal.type());
+
+                    Mono<?> actionMono = Mono.empty();
+
+                    if ("upgrade_storage".equals(currentGoal.type())) {
+                        actionMono = api.upgradeStation(new UpgradeStationRequest(myPlanetId, "storage"));
+                    } else if ("install_station".equals(currentGoal.type())) {
+                        Map<String, String> requestBody = Map.of(
+                                "source_planet_id", myPlanetId,
+                                "target_planet_id", currentGoal.targetPlanetId(),
+                                "station_name", "Beta Base Alpha"
+                        );
+                        actionMono = api.installStation(requestBody);
+                    } else if ("found_settlement".equals(currentGoal.type())) {
+                        Map<String, Object> requestBody = Map.of(
+                                "source_planet_id", myPlanetId,
+                                "target_planet_id", currentGoal.targetPlanetId(),
+                                "settlement_name", "New Beta Colony",
+                                "station_name", "Beta Gateway",
+                                "extra_goods", Map.of("food", 200, "water", 200)
+                        );
+                        actionMono = api.foundSettlement(requestBody);
+                    }
+
+                    return actionMono.doOnSuccess(res -> {
+                        log.info("Goal '{}' successfully executed!", currentGoal.type());
+                        currentGoal = null;
+                        reservedCredits = 0;
+                        reservedGoods.clear();
+                    }).onErrorResume(e -> {
+                        log.error("Failed to execute goal '{}': {}", currentGoal.type(), e.getMessage());
+                        return Mono.empty();
+                    }).then();
+                });
+    }
+
+    /**
+     * PERIODIC STATUS REPORT
+     * Prints the current state of the station's inventory and credits every 3 minutes.
+     */
+    private Mono<Void> printStationStatusReport() {
+        if (mySystemName == null || myPlanetId == null) return Mono.empty();
+
+        return api.getStation(mySystemName, myPlanetId)
+                .doOnNext(station -> {
+                    log.info("================ STATUS REPORT ================");
+                    log.info("Credits: {}", myCredits);
+                    log.info("Station: {} (Planet: {})", station.name(), myPlanetId);
+                    log.info("Inventory:");
+                    if (station.inventory() != null && !station.inventory().isEmpty()) {
+                        station.inventory().forEach((good, qty) -> {
+                            long reserved = reservedGoods.getOrDefault(good, 0L);
+                            if (reserved > 0) {
+                                log.info("  - {}: {} ({} reserved for goals)", good, qty, reserved);
+                            } else {
+                                log.info("  - {}: {}", good, qty);
+                            }
+                        });
+                    } else {
+                        log.info("  (Empty)");
+                    }
+                    if (currentGoal != null) {
+                        log.info("Current Goal: {}", currentGoal.type());
+                    }
+                    log.info("===============================================");
+                })
+                .onErrorResume(e -> {
+                    log.error("Failed to fetch status report: {}", e.getMessage());
+                    return Mono.empty();
+                })
+                .then();
     }
 }

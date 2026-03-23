@@ -52,9 +52,9 @@ public class WebhookServer {
             String body = ctx.body().asString();
             log.debug("Webhook received: {}", body);
             try {
-                WebhookEvents.EventEnvelope envelope =
-                        mapper.readValue(body, WebhookEvents.EventEnvelope.class);
-                dispatchEvent(envelope.event(), body);
+                com.fasterxml.jackson.databind.JsonNode node = mapper.readTree(body);
+                String type = node.get("type").asText();
+                dispatchEvent(type, body);
                 ctx.response().setStatusCode(200).end("OK");
             } catch (Exception e) {
                 log.error("Failed to parse webhook: {}", body, e);
@@ -75,27 +75,27 @@ public class WebhookServer {
 
     private void dispatchEvent(String event, String body) throws Exception {
         switch (event) {
-            case "OriginDockingRequest" -> {
+            case "origin_docking_request" -> {
                 var e = mapper.readValue(body, WebhookEvents.OriginDockingRequest.class);
                 log.info("Ship {} arrived at origin {}", e.shipId(), e.originPlanetId());
                 originDockingSink.tryEmitNext(e);
             }
-            case "DockingRequest" -> {
+            case "docking_request" -> {
                 var e = mapper.readValue(body, WebhookEvents.DockingRequest.class);
                 log.info("Ship {} arrived at destination", e.shipId());
                 dockingSink.tryEmitNext(e);
             }
-            case "ShipDocked" -> {
+            case "ship_docked" -> {
                 var e = mapper.readValue(body, WebhookEvents.ShipDocked.class);
                 log.info("Ship {} docked, status={}", e.shipId(), e.status());
                 shipDockedSink.tryEmitNext(e);
             }
-            case "ShipComplete" -> {
+            case "ship_delivery_complete" -> {
                 var e = mapper.readValue(body, WebhookEvents.ShipComplete.class);
                 log.info("Ship {} delivery complete", e.shipId());
                 shipCompleteSink.tryEmitNext(e);
             }
-            case "ConstructionComplete" -> {
+            case "construction_complete" -> {
                 var e = mapper.readValue(body, WebhookEvents.ConstructionComplete.class);
                 log.info("Construction project {} complete", e.projectId());
                 constructionCompleteSink.tryEmitNext(e);

@@ -98,6 +98,44 @@ java -jar target/offworld-trading-manager-1.0.0-jar-with-dependencies.jar
 
 ---
 
+## 🚀 Live Demonstration Scenario (For Evaluation)
+
+The bot is designed to run autonomously. To observe its real-time event-driven capabilities without waiting for global market shifts, execute the following commands in a separate terminal.
+
+- **Triggering Revenue (External Buyer Simulation)** — The bot actively produces and places sell orders for its goods on Earth (`Sol-3`). This command simulates a competitor (`alpha-team`) buying those goods, instantly increasing our bot's profit.
+```bash
+  curl -X POST http://localhost:8080/market/orders \
+    -H "Authorization: Bearer alpha-secret-key-001" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "player_id": "alpha-team",
+      "api_key": "alpha-secret-key-001",
+      "good_name": "iron_ore",
+      "side": "buy",
+      "order_type": "market",
+      "quantity": 500,
+      "station_planet_id": "Sol-3"
+    }'
+```
+
+**Observation**: The bot's periodic STATUS REPORT will reflect a higher credit balance in the next tick.
+
+**Testing Webhook Reactivity** (0ms Latency) — To prove the Event-Driven architecture bypasses standard polling intervals, we inject a direct webhook payload representing an arriving ship.
+
+```bash
+curl -X POST http://localhost:9090/webhooks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "origin_docking_request",
+    "ship_id": "123e4567-e89b-12d3-a456-426614174000",
+    "origin_planet_id": "Proxima Centauri-1",
+    "destination_planet_id": "Sol-3",
+    "cargo": {"water": 10}
+  }'
+```
+**Observation**: The bot's Vert.x server will parse the JSON and instantly trigger the ShipService to authorize the dock via the REST API, demonstrating end-to-end reactive bridging.
+
+
 ## Configuration Reference
 
 | Property | Default | Description |

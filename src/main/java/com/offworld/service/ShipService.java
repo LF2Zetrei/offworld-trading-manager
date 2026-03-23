@@ -132,8 +132,14 @@ public class ShipService {
         log.info("Authorizing dock for ship {}", shipId);
         return api.authorizedock(shipId)
                 .doOnNext(ship -> shipStatuses.put(shipId, ship.status()))
+                .onErrorResume(e -> {
+                    if (e.getMessage() != null && (e.getMessage().contains("403") || e.getMessage().contains("409"))) {
+                        return Mono.empty();
+                    }
+                    return Mono.error(e);
+                })
                 .retryWhen(reactor.util.retry.Retry.fixedDelay(2, Duration.ofSeconds(3))
-                        .filter(e -> e instanceof ApiException ae && ae.isUnavailable()));
+                        .filter(e -> e.getMessage() != null && e.getMessage().contains("503")));
     }
 
     private Mono<Ship> scheduleUndock(String shipId, String dockedStatus) {
@@ -148,17 +154,18 @@ public class ShipService {
                 .doOnError(e -> log.warn("scheduleUndock timeout/error for {}", shipId));
     }
 
-    private Mono<Ship> authorizeUndock(String shipId) {
+    public Mono<Ship> authorizeUndock(String shipId) {
         log.info("Authorizing undock for ship {}", shipId);
         return api.authorizeUndock(shipId)
                 .doOnNext(ship -> shipStatuses.put(shipId, ship.status()))
                 .onErrorResume(e -> {
-                    if (e instanceof ApiException ae && ae.isBadRequest() &&
-                            ae.getBody().contains("Storage full")) {
-                        log.warn("Destination storage full for ship {}. Will retry.", shipId);
+                    if (e.getMessage() != null && (e.getMessage().contains("403") || e.getMessage().contains("409"))) {
+                        return Mono.empty();
                     }
                     return Mono.error(e);
-                });
+                })
+                .retryWhen(reactor.util.retry.Retry.fixedDelay(2, Duration.ofSeconds(3))
+                        .filter(e -> e.getMessage() != null && e.getMessage().contains("503")));
     }
 
     /**

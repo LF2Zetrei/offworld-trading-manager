@@ -166,6 +166,7 @@ public class ApiClient {
                    new TypeReference<>() {});
     }
 
+
     /**
      * Blocking transfer — the server holds the HTTP connection open.
      * Uses the long-timeout elevatorClient so a reactor thread is not blocked.
@@ -302,6 +303,9 @@ public class ApiClient {
     }
     public Mono<ConstructionProject> installStation(Map<String, String> request) {
         return post("/construction/install-station", request, new TypeReference<>() {});
+    }
+    public Mono<ConstructionProject> foundSettlement(Map<String, Object> request) {
+        return post("/construction/found-settlement", request, new TypeReference<>() {});
     }
 
     // ─── Player ───────────────────────────────────────────────────────────────

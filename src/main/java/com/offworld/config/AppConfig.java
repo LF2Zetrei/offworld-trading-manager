@@ -33,8 +33,7 @@ public class AppConfig {
         }
     }
 
-    private String get(String key, String defaultValue) {
-        // Environment variables take priority (e.g. SERVER_BASE_URL -> server.base-url)
+    public String get(String key, String defaultValue) {
         String envKey = key.toUpperCase().replace('.', '_').replace('-', '_');
         String envVal = System.getenv(envKey);
         if (envVal != null && !envVal.isBlank()) return envVal;

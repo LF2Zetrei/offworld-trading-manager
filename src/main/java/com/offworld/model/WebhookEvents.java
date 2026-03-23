@@ -46,5 +46,5 @@ public class WebhookEvents {
      * Raw envelope to detect event type before deserializing the full payload.
      */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    public record EventEnvelope(String event) {}
+    public record EventEnvelope(@JsonProperty("type") String type) {}
 }
